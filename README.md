@@ -1,5 +1,7 @@
 # ULTRA SCRAPER v3 — Google Maps Lead Extractor
 
+Also see how this works in our uploaded video on release https://github.com/ApexAutomationTeam/Google-Maps-Scraper/releases/tag/v1.0.0
+
 > 💡 **Community Project**: This tool is open-sourced and provided for free as part of the automation initiatives by **[Apex Automation Team](https://apexautomationteam.com/)**. Visit our official website for enterprise-level automation, custom scraping tools, and AI workflows.
 
 A high-performance, in-browser Google Maps scraper that extracts full business listing datasets directly into a clean, structured `.xlsx` (Excel) spreadsheet with segmented addresses (Street, City, State, Zip, Country), phone numbers, direct website links, and social profiles.
