@@ -1,0 +1,554 @@
+/* ============================================================================
+   🚀 ULTRA SCRAPER v3 — Google Maps leads (phone + website + social + address)
+   ----------------------------------------------------------------------------
+   v3 me kya theek hua (sab live test shuda):
+   • ❗SAFETY: agar page ka search term aur data match na kare to script RUK
+     jayegi aur khud sahi page pe le jayegi — pehle chupke se PURANI search ka data
+     aa jata tha (Maps ka buffer 250 pe bhar jata hai)
+   • Address ab GUESS nahi hota — Google ki apni structured fields se
+   • Plus Code (GC29+FQH) Street se nikal kar apne column me
+   • Duplicate kachra saaf: "F-7 Markaz F7 Markaz F-7" -> "F-7 Markaz"
+   • City/State/Country har mulk ke liye (Pakistan, US, UAE, UK sab test kiye)
+   • Phone ke DO column: "Phone" = saaf (345-845-6753, na code na zero)
+     aur "Phone (Original)" = Google wala poora (+92 345 8456753)
+   • Google Maps URL ab ASLI openable listing link (place_id wala)
+
+   KAHAN CHALANA HAI:
+     1) Chrome me Google Maps kholein aur keyword search karein
+     2) F12 -> Console  3) Ye poora code paste -> Enter  4) .xlsx download
+
+   ⚠️ NAYI SEARCH KAISE KAREIN: search box me likh kar Enter dabana kaafi
+   NAHI hai — Maps us soorat me poori list load nahi karta (test me 116 ki
+   jagah sirf 3 aaye the). Aur F5 bhi kaam nahi karta, kyunki wo aksar PURANI
+   search wapas le aata hai.
+   Sabse aasan: script chala do. Agar list adhoori hui to wo KHUD page ko
+   sahi search pe le jayegi — bas 3-4 second baad code dobara paste kar dena.
+   ============================================================================ */
+
+(async function () {
+  const MAX_PAGES  = 15;     // 15 x 20 = 300 tak. Barhana ho to badha dein.
+  const PAGE_DELAY = 1200;
+  const FORCE_CITY = '';     // chaho to city yahan likh do, warna khud pakri jayegi
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  // ---------- .xlsx khud banate hain (koi library / CDN / eval nahi) ----------
+  // Google Maps ki CSP ab eval block karti hai, isliye XLSX library load nahi hoti thi
+  // aur file CSV ban jati thi. Ab ZIP + XML khud likhte hain — hamesha .xlsx milegi.
+  function makeXlsx(aoa, opts){
+    opts = opts || {}; const urlCols = opts.urlCols || new Set(); const colW = opts.colWidths || [];
+    const CRC = (()=>{ const t=new Int32Array(256);
+      for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c = c&1 ? (0xEDB88320 ^ (c>>>1)) : (c>>>1); t[n]=c; }
+      return b=>{ let c=-1; for(let i=0;i<b.length;i++) c = t[(c^b[i])&0xFF] ^ (c>>>8); return (c^-1)>>>0; }; })();
+    const enc = s => new TextEncoder().encode(s);
+    const esc = s => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c]))
+                              .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g,'');
+    const colName = n => { let s=''; n++; while(n>0){ const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=(n-m-1)/26; } return s; };
+    const headers = aoa[0]||[]; const links = []; let sheet='';
+    aoa.forEach((row,r)=>{ let cells='';
+      row.forEach((v,c)=>{ if(v===null||v===undefined||v==='') return;
+        const ref = colName(c)+(r+1);
+        const isNum = (typeof v==='number') || (typeof v==='string' && /^-?\d+(\.\d+)?$/.test(v) && v.length<15);
+        if(r>0 && urlCols.has(headers[c]) && typeof v==='string' && /^https?:\/\//.test(v)) links.push({ref,target:v});
+        cells += isNum ? `<c r="${ref}"><v>${Number(v)}</v></c>`
+                       : `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${esc(v)}</t></is></c>`; });
+      sheet += `<row r="${r+1}">${cells}</row>`; });
+    const last = colName(Math.max(0,headers.length-1)) + aoa.length;
+    const cols = colW.length ? `<cols>${colW.map((w,i)=>`<col min="${i+1}" max="${i+1}" width="${w}" customWidth="1"/>`).join('')}</cols>` : '';
+    const hl = links.length ? `<hyperlinks>${links.map((l,i)=>`<hyperlink ref="${l.ref}" r:id="rId${i+1}"/>`).join('')}</hyperlinks>` : '';
+    const P='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    const files = [
+      ['[Content_Types].xml', P+'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>'],
+      ['_rels/.rels', P+'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'],
+      ['xl/workbook.xml', P+'<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Leads" sheetId="1" r:id="rId1"/></sheets></workbook>'],
+      ['xl/_rels/workbook.xml.rels', P+'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>'],
+      ['xl/worksheets/sheet1.xml', P+`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dimension ref="A1:${last}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="15"/>${cols}<sheetData>${sheet}</sheetData><autoFilter ref="A1:${last}"/>${hl}</worksheet>`],
+    ];
+    if (links.length) files.push(['xl/worksheets/_rels/sheet1.xml.rels', P+`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${links.map((l,i)=>`<Relationship Id="rId${i+1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${esc(l.target)}" TargetMode="External"/>`).join('')}</Relationships>`]);
+    const chunks=[], central=[]; let off=0;
+    const u16=n=>[n&255,(n>>8)&255], u32=n=>[n&255,(n>>8)&255,(n>>16)&255,(n>>>24)&255];
+    files.forEach(([name,content])=>{ const nb=enc(name), db=enc(content), crc=CRC(db);
+      const lh=[].concat([80,75,3,4],u16(20),u16(0),u16(0),u16(0),u16(0),u32(crc),u32(db.length),u32(db.length),u16(nb.length),u16(0));
+      chunks.push(new Uint8Array(lh), nb, db);
+      const cd=[].concat([80,75,1,2],u16(20),u16(20),u16(0),u16(0),u16(0),u16(0),u32(crc),u32(db.length),u32(db.length),u16(nb.length),u16(0),u16(0),u16(0),u16(0),u32(0),u32(off));
+      cd.nb=nb; central.push(cd); off += lh.length + nb.length + db.length; });
+    const cdStart=off; let cdLen=0;
+    central.forEach(c=>{ chunks.push(new Uint8Array(c), c.nb); cdLen += c.length + c.nb.length; });
+    chunks.push(new Uint8Array([].concat([80,75,5,6],u16(0),u16(0),u16(files.length),u16(files.length),u32(cdLen),u32(cdStart),u16(0))));
+    let total=0; chunks.forEach(c=>total+=c.length);
+    const out=new Uint8Array(total); let p=0; chunks.forEach(c=>{out.set(c,p);p+=c.length;});
+    return out;
+  }
+
+  // ---------- 0) keyword — search box sabse sahi hai (URL peeche reh jata hai) ----------
+  const box = document.querySelector('input#searchboxinput')
+           || document.querySelector('input[name="q"]')
+           || document.querySelector('form input[type="text"]');
+  const keyword = ((box && box.value) || '').trim()
+    || (document.title||'').replace(/\s*[-–]\s*Google Maps\s*$/i,'').trim()
+    || decodeURIComponent((location.pathname.match(/\/search\/([^\/@]+)/)||['',''])[1].replace(/\+/g,' ')).trim();
+  const norm = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  const KEY  = norm(keyword);
+  console.log(`🔎 Search term: "${keyword}"`);
+
+  // ---------- 1) base request — LAZMI isi search term ka ----------
+  const dec = u => { try { return decodeURIComponent(u); } catch(e){ return u; } };
+  // aane wali har search request yaad rakho (Chrome ka buffer 250 pe bhar jata hai)
+  // NOTE: apni khud ki fetch ORIG_FETCH se karte hain taake hook me na aayein
+  if (!window.__gmapsHook) {
+    window.__gmapsCap = [];
+    window.__gmapsOrigFetch = window.fetch.bind(window);
+    const push = u => { try{ if(u && /\/search\?/.test(u) && /[?&]pb=/.test(u)) { window.__gmapsCap.push(u); if(window.__gmapsCap.length>40) window.__gmapsCap.shift(); } }catch(e){} };
+    const of_ = window.fetch;
+    window.fetch = function(...a){ push((typeof a[0]==='string')?a[0]:(a[0]&&a[0].url)); return of_.apply(this,a); };
+    const oo = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(m,u,...r){ push(u); return oo.call(this,m,u,...r); };
+    window.__gmapsHook = 1;
+  }
+  const ORIG_FETCH = window.__gmapsOrigFetch || window.fetch.bind(window);
+  // Google do tarah se jawab deta hai — dono handle karo
+  const parseResp = txt => {
+    let s = String(txt).trim().replace(/\/\*""\*\/\s*$/,'');
+    if (/^\{"[a-z]":/.test(s)) { try { const o=JSON.parse(s); s = o.d || o.data || ''; } catch(e){} }
+    s = s.replace(/^\)\]\}'\n?/,'');
+    try { return JSON.parse(s); } catch(e){ return null; }
+  };
+  const countIn = P => { let n=0; const scan=(v,d)=>{ if(d>10||!Array.isArray(v))return;
+    v.forEach(x=>{ if(Array.isArray(x)&&Array.isArray(x[1])&&typeof x[1][11]==='string') n++; else scan(x,d+1); }); };
+    if(P) scan(P,0); return n; };
+
+  // saare candidates jama karo (pagination hata kar, duplicate nikaal kar)
+  const gather = () => {
+    const a = (window.__gmapsCap||[]).slice().reverse();
+    const b = performance.getEntriesByType('resource').map(r=>r.name)
+        .filter(n => /\/search\?/.test(n) && /[?&]pb=/.test(n)).reverse();
+    return [...new Set(a.concat(b)
+      .filter(u => !KEY || norm(dec(u)).indexOf(KEY) > -1)
+      .map(u => u.replace(/!7i\d+/g,'').replace(/!8i\d+/g,'')))];
+  };
+
+  // Agar page apni search pe theek se load nahi hua (search box me naya word,
+  // magar URL purani) to F5 ULTA kaam karta hai — purani search wapas aa jati hai.
+  // Isliye code khud sahi URL pe le jata hai.
+  const canonical = 'https://www.google.com/maps/search/' + encodeURIComponent(keyword).replace(/%20/g,'+');
+  const fixOnce = (why) => {
+    let already = ''; try { already = sessionStorage.getItem('__gmapsFix')||''; } catch(e){}
+    if (already === keyword) return false;                 // ek hi baar, warna loop ban jayega
+    try { sessionStorage.setItem('__gmapsFix', keyword); } catch(e){}
+    console.warn(why);
+    console.warn('   🔄 Page ko sahi search pe le ja raha hoon (F5 mat dabaein — wo purani search wapas laata hai).');
+    console.warn('   👉 Page load hone ke 3-4 second baad ye code DOBARA paste karein.');
+    location.href = canonical;
+    return true;
+  };
+
+  let cands = gather();
+  if (!cands.length) {
+    console.log('⏳ Is search ka request dhoond rahe hain — thoda scroll kar ke...');
+    const f = document.querySelector('div[role="feed"]');
+    for (let i=0; i<3 && !cands.length; i++) { if (f) f.scrollTo(0, f.scrollHeight); await sleep(1800); cands = gather(); }
+  }
+  if (!cands.length) {
+    if (fixOnce('⚠️ Is search term ka data nahi mila — page abhi purani search pe atka hua hai.')) return;
+    console.error('❌ Is search term ka data nahi mila.');
+    console.error(`   👉 Ye link address bar me kholein aur phir code paste karein:  ${canonical}`);
+    return;
+  }
+
+  // ❗ har candidate ko aazma kar dekho — jo sabse zyada results de, wahi asli list hai
+  // (Maps chhoti "preview" requests bhi bhejta hai jo sirf 2-3 result deti hain)
+  let base = '', firstPage = null, bestN = -1;
+  for (const u of cands.slice(0, 8)) {
+    let P = null;
+    try { P = parseResp(await (await ORIG_FETCH(u, {headers:{'accept-language':'en'}})).text()); } catch(e){}
+    const n = countIn(P);
+    if (n > bestN) { bestN = n; base = u; firstPage = P; }
+    if (n >= 15) break;                       // poori list mil gayi, aur dhoondne ki zaroorat nahi
+    await sleep(300);
+  }
+  // Maps ne poori list load nahi ki — khud sahi page pe le jao
+  if (bestN < 15) {
+    if (fixOnce(`⚠️ Maps ne poori list load nahi ki thi (sirf ${bestN} results mil rahe the).`)) return;
+    if (bestN <= 0) {
+      console.error('❌ Data khali mila.');
+      console.error(`   👉 Ye link address bar me kholein, phir code paste karein:  ${canonical}`);
+      return;
+    }
+    console.warn(`⚠️ Is search me sirf ${bestN} results mile — shayad itne hi maujood hain.`);
+  } else {
+    try { sessionStorage.removeItem('__gmapsFix'); } catch(e){}
+  }
+  console.log(`✅ Sahi request mil gayi (${cands.length} me se, pehle page pe ${bestN} results). Baaki pages laa rahe hain...`);
+  // Google ke results map ke view (zoom) se badalte hain — isliye ye bata do
+  const zoomNow = (location.pathname.match(/,(\d+(?:\.\d+)?)z/)||[])[1];
+  if (zoomNow) console.log(`🗺️  Map view: ${zoomNow}z — zoom badalne se results thore kam/zyada ho sakte hain (Google ka apna behaviour).`);
+
+  // ---------- helpers ----------
+  // Ek hi format sab ke liye: country code nahi, leading 0 nahi -> 423-575-0272
+  const fmtPhone = (raw) => {
+    if (!raw) return '';
+    const s = String(raw).trim();
+    let d = s.replace(/[^\d]/g,'');
+    const m = s.match(/^\+(\d{1,4})[\s\-\.]/);                 // "+92 345 ..." -> cc = 92
+    if (m && d.indexOf(m[1]) === 0) d = d.slice(m[1].length);
+    else if (/^92/.test(d) && d.length > 10) d = d.slice(2);
+    d = d.replace(/^0+/,'');
+    if (d.length < 6) return d;
+    return d.slice(0,3)+'-'+d.slice(3,6)+'-'+d.slice(6);
+  };
+
+  /* ---------------- ADDRESS ENGINE ---------------- */
+  const STATES = ['punjab','sindh','balochistan','khyber pakhtunkhwa','kpk','gilgit baltistan','azad kashmir',
+                  'islamabad capital territory','dubai','abu dhabi','sharjah','maharashtra','california','texas',
+                  'new york','illinois','ontario','england','scotland','wales'];
+  const PLUS_RE = /\b[23456789CFGHJMPQRVWX]{4}\+[23456789CFGHJMPQRVWX]{2,3}\b/;
+
+  const clean = t => String(t==null?'':t)
+    .replace(/[*_`~]+/g,' ')
+    .replace(/[،؛]/g,',')                 // urdu/arabic comma -> normal comma
+    .replace(/\s+/g,' ')
+    .replace(/\s*,\s*/g,', ')
+    .replace(/,\s*(?=,)/g,'')
+    .replace(/^[\s,\-]+|[\s,\-]+$/g,'');
+
+  // ek segment ke andar Google ke repeat tukde hatao
+  // "F-7 Markaz F7 Markaz F-7" -> "F-7 Markaz"   |   "Block A Block B" -> waisa hi
+  const dedupToks = seg => {
+    const k = t => t.toLowerCase().replace(/[^a-z0-9]/g,'');
+    const toks = String(seg).split(' ').filter(Boolean), K = toks.map(k);
+    const out=[], oK=[];
+    for (let i=0;i<toks.length;i++){
+      if (oK.length && K[i] && K[i]===oK[oK.length-1]) continue;                    // lagatar repeat
+      let skip=false;
+      if (i+1<toks.length && K[i] && K[i+1])
+        for (let j=0;j+1<oK.length;j++) if (oK[j]===K[i] && oK[j+1]===K[i+1]) { skip=true; break; }
+      if (skip) { i++; continue; }                                                  // repeat jodi
+      out.push(toks[i]); oK.push(K[i]);
+    }
+    const L=oK.length-1;                                                            // aakhri fazool tukda
+    if (L>0 && oK[L] && oK[L].length>=2 && oK.slice(0,L).some(x=>x===oK[L]||x.indexOf(oK[L])===0)) out.pop();
+    return out.join(' ');
+  };
+
+  const tidy = s => dedupToks(clean(s).replace(/\b([A-Za-z])\s(\d{1,2})\b/g,'$1$2')).trim();
+
+  // repeat / ek doosre me shaamil segments hatao
+  const dedupeSegs = str => {
+    const out=[];
+    clean(str).split(',').map(s=>tidy(s)).filter(Boolean).forEach(s=>{
+      const l=s.toLowerCase();
+      if (out.some(o=>{const ol=o.toLowerCase(); return ol===l || (l.length>=4 && ol.indexOf(l)>-1);})) return;
+      for (let i=out.length-1;i>=0;i--){ const ol=out[i].toLowerCase(); if (ol.length>=4 && l.indexOf(ol)>-1) out.splice(i,1); }
+      out.push(s);
+    });
+    return out;
+  };
+
+  const addrOf = (b) => {
+    // Google ka apna structured address: [area, street, street, city, zip, state, countryCode]
+    const A = (b[183] && Array.isArray(b[183][1])) ? b[183][1] : null;
+    const L = (b[183] && Array.isArray(b[183][0])) ? b[183][0] : [];
+    const pick = t => { const e=L.find(x=>Array.isArray(x)&&x[0]===t); try{ return clean(e[1][0][0]); }catch(_){ return ''; } };
+    const fullRaw = clean(Array.isArray(b[2]) ? b[2].join(', ') : '');
+
+    let area='', street='', city='', zip='', state='', country='', cc='';
+    if (A) { area=clean(A[0]); street=clean(A[1]||A[2]); city=clean(A[3]); zip=clean(A[4]); state=clean(A[5]); cc=A[6]||''; }
+    // Kabhi dukaandaar zip ke saath lafz chipka deta hai ("selatan12940") —
+    // aise me sirf ankon wala hissa bacha lo, poora zip zaya mat karo.
+    if (zip && !/^[A-Za-z0-9][A-Za-z0-9\- ]{2,9}$/.test(zip)) {
+      const zm = zip.match(/(\d{4,6})\s*$/); if (zm) zip = zm[1];
+    }
+
+    // "Lahore, Pakistan" / "Chicago, IL, United States" / "Dubai - United Arab Emirates"
+    const p4 = pick(4).split(/\s*,\s*|\s+-\s+/).map(s=>s.trim()).filter(Boolean);
+    if (p4.length) {
+      country = p4[p4.length-1];
+      if (!state && p4.length>2) state = p4[1];
+    }
+    if (!country) { const fp=fullRaw.split(',').map(s=>s.trim()).filter(Boolean); country = fp[fp.length-1]||''; }
+
+    // ---- CITY ----
+    // Kuch jagah (Toronto ke York/Scarborough jaise borough) Google city khali
+    // chhod deta hai. Us waqt SUBA ko city mat banao — poore address me se
+    // country aur (state + zip) hata kar jo aakhri tukda bache, wahi city hai.
+    const cityFromFull = () => {
+      let sg = fullRaw.split(/\s*,\s*|\s+-\s+/).map(x=>x.trim()).filter(Boolean);
+      if (country && sg.length && sg[sg.length-1].toLowerCase()===country.toLowerCase()) sg.pop();
+      while (sg.length) {                                  // "ON M9N 2A1" / "IL 60654" / "54760"
+        const last = sg[sg.length-1];
+        if (/^[A-Za-z]{2}\s+[A-Za-z0-9][A-Za-z0-9\- ]{2,9}$/.test(last) ||
+            (/^[A-Za-z0-9][A-Za-z0-9\- ]{2,9}$/.test(last) && /\d/.test(last))) { sg.pop(); continue; }
+        break;
+      }
+      // Dubai jaise sheher-riyasat me ye state ke barabar hoga — neeche wala
+      // rule state ko khali kar dega, city sahi reh jayegi.
+      return sg[sg.length-1] || '';
+    };
+    if (!city && p4.length>1 && p4[0].toLowerCase() !== String(state||'').toLowerCase()) city = p4[0];
+    if (!city) city = cityFromFull();
+    if (state && city && state.toLowerCase()===city.toLowerCase()) state='';       // Dubai/Dubai wala case
+
+    // structured na mile to purane tareeqe se
+    if (!A) {
+      const p = fullRaw.split(',').map(s=>s.trim()).filter(Boolean);
+      if (p.length && p[p.length-1].toLowerCase()===country.toLowerCase()) p.pop();
+      for (let i=p.length-1;i>=0;i--) if (/^\d{4,6}$/.test(p[i])) { zip=p.splice(i,1)[0]; break; }
+      if (!city && p.length>1) city = p.pop();
+      street = p.join(', ');
+    }
+
+    // Plus Code alag column me
+    let plus='';
+    const m = street.match(PLUS_RE) || area.match(PLUS_RE) || fullRaw.match(PLUS_RE);
+    if (m) { plus=m[0]; street=street.replace(PLUS_RE,' '); area=area.replace(PLUS_RE,' '); }
+
+    // street + area jodo aur saaf karo
+    let segs = dedupeSegs([street, area].filter(Boolean).join(', '));
+
+    // street ke andar se city / state / country / zip nikaal do
+    const kill = new Set([city, country, state].filter(Boolean).map(x=>x.toLowerCase()));
+    segs = segs.filter(s => {
+      const l = s.toLowerCase();
+      if (STATES.indexOf(l) > -1) { if(!state) state=s; return false; }
+      if (kill.has(l)) return false;
+      if (/^\d{4,6}$/.test(s)) { if(!zip) zip=s; return false; }
+      const sz = l.match(/^(.+?)\s+(\d{4,6})$/);            // "Punjab 54000" jaisa tukda
+      if (sz && STATES.indexOf(sz[1]) > -1) { if(!state) state=s.split(/\s+/)[0]; if(!zip) zip=sz[2]; return false; }
+      return true;
+    });
+
+    return { street: segs.join(', '), city, state, zip, country, plus, cc };
+  };
+  /* -------------- /ADDRESS ENGINE -------------- */
+
+  // Social match HOSTNAME se hota hai, substring se nahi — warna "complex.com" ke
+  // andar "x.com" mil jata tha aur business ki website Twitter column me chali jati thi
+  const SOCIAL_DEFS=[['Facebook',['facebook.com','fb.com','fb.me']],['Instagram',['instagram.com']],
+    ['Twitter/X',['twitter.com','x.com','t.co']],['LinkedIn',['linkedin.com','lnkd.in']],
+    ['YouTube',['youtube.com','youtu.be']],['TikTok',['tiktok.com']],
+    ['WhatsApp',['wa.me','whatsapp.com']],['Pinterest',['pinterest.com','pin.it']],['Snapchat',['snapchat.com']]];
+  // Sirf Google ke apne asset/tracking hosts. Aggregator (linktr.ee, booking.com
+  // waghera) ab BLOCK NAHI hote — website Google ke apne field se aati hai, aur
+  // agar business ne wahi link diya hai to wo uska ASLI link hai, kachra nahi.
+  const JUNK_HOSTS=['gstatic.com','ggpht.com','googleusercontent.com','googleapis.com','google-analytics.com',
+    'googletagmanager.com','doubleclick.net','googleadservices.com','gvt1.com','gvt2.com','goo.gl','g.co',
+    'schema.org','w3.org','example.com','wixstatic.com','squarespace-cdn.com','shopifycdn.com'];
+  const hostOf = u => { try { return new URL(u).hostname.toLowerCase().replace(/^www\./,''); } catch(e){ return ''; } };
+  const isHost = (h,d) => h===d || h.endsWith('.'+d);
+  const socialOf = u => { const h=hostOf(u); for(const [lab,ds] of SOCIAL_DEFS) if(ds.some(d=>isHost(h,d))) return lab; return ''; };
+  // koi bhi google.<kuch bhi> domain (google.com, google.co.uk, google.pk...)
+  const isGoogle = h => /(^|\.)google(apis|usercontent|tagmanager|adservices)?\.[a-z.]{2,7}$/.test(h) || /(^|\.)google\./.test(h);
+  // tasveer / file / script — website nahi
+  const ASSET_RE = /\.(png|jpe?g|jpg|gif|webp|avif|svg|ico|bmp|tiff?|mp4|webm|mov|mp3|css|js|json|xml|woff2?|ttf|eot|pdf)(\?|#|$)/i;
+  const ASSET_PATH = /\/(thumbnail|streetview|photo|image|img|static|assets|cdn-cgi)\b/i;
+  const isJunk = u => {
+    const h = hostOf(u);
+    if (!h || h==='localhost' || /^\d+\.\d+\.\d+\.\d+$/.test(h)) return true;
+    if (isGoogle(h)) return true;
+    if (JUNK_HOSTS.some(d => isHost(h,d))) return true;
+    if (ASSET_RE.test(u)) return true;
+    let path=''; try { path = new URL(u).pathname; } catch(e){}
+    if (ASSET_PATH.test(path)) return true;
+    return false;
+  };
+
+  /* ============ FIELD ENGINE ============================================
+     Ahem: ab poore data me regex se kuch NAHI dhoonda jata. Har cheez Google
+     ke apne mukarrar khane se aati hai, aur likhne se pehle validator pass
+     karti hai. Jo validator fail kare wo khali chhod di jati hai — galat
+     value file me kabhi nahi jayegi.
+        Naam      b[11]        Category  b[13][0]     Rating/Reviews b[4][7], b[4][8]
+        Place ID  b[78]        Address   b[183][1]    Phone          b[178][0][0]
+        Website   b[7][0]      Price     b[4][2]      Hours          b[203][1]
+     =================================================================== */
+  const gv = (o, ...idx) => { let c=o; for(const i of idx){ if(c==null) return null; c=c[i]; } return c; };
+  const str = v => (typeof v==='string') ? v.trim().replace(/\s+/g,' ') : (typeof v==='number' ? String(v) : '');
+
+  const V = {                                            // har column ka validator
+    name:    v => v.length>0 && v.length<=160 && !/^[0-9][A-Za-z0-9_\-]{18,}$/.test(v),   // token nahi
+    text:    v => v.length>0 && v.length<=120,
+    phone:   v => /^\+?\d[\d\s\-().]{5,24}$/.test(v),
+    rating:  v => /^[0-5](\.\d)?$/.test(v),
+    reviews: v => /^\d{1,9}$/.test(v),
+    zip:     v => /^[A-Z0-9][A-Z0-9\- ]{2,9}$/i.test(v),
+    plus:    v => /^[23456789CFGHJMPQRVWX]{4}\+[23456789CFGHJMPQRVWX]{2,3}$/.test(v),
+    hours:   v => /^(Open|Closed|Closes|Opens)\b/.test(v) && v.length<=45,
+    price:   v => /\d/.test(v) && v.length<=30,
+    url:     v => { try { const u=new URL(v);
+                      return /^https?:$/.test(u.protocol) && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(u.hostname) && !isJunk(v);
+                    } catch(e){ return false; } },
+    street:  v => v.length<=200 && !/https?:\/\//.test(v) && !/^[0-9][A-Za-z0-9_\-]{18,}$/.test(v),
+  };
+  const QC = {};                                          // kya kya reject hua — aakhir me report
+  const ok = (val, test, tag) => {
+    const v = str(val);
+    if (!v) return '';
+    if (test(v)) return v;
+    QC[tag] = (QC[tag]||0) + 1;                           // reject hua — khali jayega
+    return '';
+  };
+
+  const tidyUrl = u => { try{ const w=new URL(u); return w.origin + (w.pathname==='/'?'':w.pathname.replace(/\/$/,'')); }catch(e){ return ''; } };
+  // share/login/intent wale link kisi ka profile nahi hote
+  const BAD_SOCIAL_PATH = /\/(sharer|share_channel|login|signup|intent|tr|plugins|dialog|help|policies|legal)\b/i;
+  const socialLink = u => {
+    if (!V.url(u)) return '';
+    let p=''; try{ p=new URL(u).pathname; }catch(e){}
+    if (BAD_SOCIAL_PATH.test(p)) return '';
+    if (p==='' || p==='/') return '';                     // sirf homepage — kisi ka profile nahi
+    return tidyUrl(u);
+  };
+
+  const nodeToRec = (b) => {
+    if (!Array.isArray(b)) return null;
+    const name = ok(gv(b,11), V.name, 'name');
+    if (!name) return null;
+    if (/\(Owner\)|^Beverage menu|^Menu$/.test(name)) return null;
+    // har asli listing ka place_id hota hai — jiska na ho wo Google ka internal token hai
+    const pid = str(gv(b,78));
+    if (!/^ChI[A-Za-z0-9_\-]{10,}$/.test(pid)) return null;
+
+    const a = addrOf(b);
+
+    // ---- Website: Google ka apna khana b[7][0] ----
+    let website = ok(gv(b,7,0), V.url, 'website');
+    website = website ? tidyUrl(website) : '';
+
+    // ---- Social: sirf social hosts, aur sirf profile-jaise link ----
+    const soc = {}; SOCIAL_DEFS.forEach(([l]) => soc[l] = '');
+    if (website && socialOf(website)) { soc[socialOf(website)] = website; website = ''; }  // site khud FB page ho
+    const blob = JSON.stringify(b);
+    const found = [...new Set((blob.match(/https?:\\?\/\\?\/[^"\\]{4,300}/g)||[]).map(u=>u.replace(/\\/g,'')))];
+    found.forEach(u => { const lab = socialOf(u); if (!lab || soc[lab]) return; const link = socialLink(u); if (link) soc[lab] = link; });
+
+    // ---- Phone: Google ka apna khana b[178][0][0] ----
+    const rawPhone = ok(gv(b,178,0,0), V.phone, 'phone');
+
+    // ---- Hours: sirf b[203] ke andar dhoondo, poore blob me nahi ----
+    let hours = '';
+    const hs = gv(b,203,1);
+    if (Array.isArray(hs)) for (const x of hs) {
+      const cand = Array.isArray(x) ? str(x[0]) : str(x);
+      if (cand && V.hours(cand)) { hours = cand; break; }
+    }
+
+    // ---- Maps URL ----
+    const mapsUrl = 'https://www.google.com/maps/place/?q=place_id:' + pid;
+
+    return {
+      base:{ Keyword:keyword, 'Business Name':name,
+        Category: ok(gv(b,13,0), V.text, 'category'),
+        Rating:   ok(gv(b,4,7),  V.rating,  'rating'),
+        Reviews:  ok(gv(b,4,8),  V.reviews, 'reviews'),
+        Street:   ok(a.street, V.street, 'street'),
+        City:     ok(a.city,    V.text, 'city'),
+        State:    ok(a.state,   V.text, 'state'),
+        Zip:      ok(a.zip,     V.zip,  'zip'),
+        Country:  ok(a.country, V.text, 'country'),
+        Phone:    fmtPhone(rawPhone),
+        'Phone (Original)': rawPhone,
+        Website:  website },
+      soc,
+      tail:{ 'Plus Code': ok(a.plus, V.plus, 'plusCode'),
+        Hours: hours,
+        Price: ok(gv(b,4,2), V.price, 'price'),
+        'Google Maps URL': mapsUrl,
+        'Full Address': '' }
+    };
+  };
+
+  const seen = new Set(); const rows = [];
+  let pageRaw = 0;                       // is page pe Google ne kitne bheje (duplicate milaa kar)
+  const scanData = (P) => {
+    let added=0; pageRaw=0;
+    if (!P) return 0;
+    const scan=(v,d)=>{ if(d>10||!Array.isArray(v))return; v.forEach(x=>{
+      if(Array.isArray(x)&&Array.isArray(x[1])&&typeof x[1][11]==='string'){ pageRaw++; const r=nodeToRec(x[1]); if(r){ const k=r.base['Business Name'].toLowerCase().replace(/[^a-z0-9]/g,''); if(k&&!seen.has(k)){seen.add(k); rows.push(r); added++;} } }
+      else scan(x,d+1); }); };
+    scan(P,0); return added;
+  };
+
+  // ---------- 2) page by page ----------
+  // Ruko sirf tab jab Google BILKUL khali page de, ya lagataar 2 page pe koi
+  // naya business na aaye. (Pehle ek hi duplicate-bhare page pe ruk jate the —
+  // isi wajah se kabhi kam kabhi zyada leads aate the.)
+  let dry = 0;
+  for (let p=0; p<MAX_PAGES; p++) {
+    const url = base + (p===0 ? '' : `!7i20!8i${p*20}`);
+    let added = 0;
+    try {
+      // page 1 ka data upar hi mil chuka hai — dobara fetch mat karo
+      const P = (p===0 && firstPage) ? firstPage
+              : parseResp(await (await ORIG_FETCH(url,{headers:{'accept-language':'en'}})).text());
+      added = scanData(P);
+    } catch (e) { console.warn(`  page ${p+1} error:`, e.message); }
+    console.log(`  page ${p+1}: +${added} naye  |  total: ${rows.length}`);
+    if (p > 0) {
+      if (pageRaw === 0) { console.log('  (list khatam)'); break; }
+      dry = (added === 0) ? dry + 1 : 0;
+      if (dry >= 2) { console.log('  (list khatam)'); break; }
+    }
+    await sleep(PAGE_DELAY);
+  }
+  if (!rows.length) { console.warn('Kuch nahi mila.'); return; }
+
+  // ---------- 3) city/country ki chhoti galtiyan theek karo ----------
+  const top = o => (Object.entries(o).sort((a,b)=>b[1]-a[1])[0]||[''])[0];
+  const fC={}, fK={};
+  rows.forEach(r=>{ if(r.base.City) fC[r.base.City]=(fC[r.base.City]||0)+1; if(r.base.Country) fK[r.base.Country]=(fK[r.base.Country]||0)+1; });
+  const DOM = FORCE_CITY || top(fC), DOMC = top(fK);
+  // City ki jagah dukaandaar ne galti se "Sector"/"coloney" jaisa likh diya ho
+  const NOTCITY = /^(sector|sactor|secter|colony|coloney|colnoy|block|street|st|road|rd|town|chowk|market|phase|plot|shop|floor|near|opposite|main|gali|lane|avenue|ave|plaza|mall|centre|center)\b/i;
+  rows.forEach(r=>{
+    const c = r.base.City;
+    if ((!c || c.length<4 || /^[IVXLC]+$/i.test(c) || /^\d+$/.test(c) || (NOTCITY.test(c) && fC[c]===1)) && DOM) {
+      if (c && /^([IVXLC]+|\d+)$/i.test(c)) r.base.Street = (r.base.Street ? r.base.Street+' '+c : c);  // "III" wapas street me
+      r.base.City = DOM;
+    }
+    if (!r.base.Country && DOMC) r.base.Country = DOMC;
+    r.base.Street = tidy(r.base.Street).replace(/^[\s,]+|[\s,]+$/g,'');
+    r.tail['Full Address'] = [r.base.Street, r.base.City, r.base.State, r.base.Zip, r.base.Country].filter(Boolean).join(', ');
+  });
+
+  console.log(`✅ TOTAL ${rows.length} leads | phone: ${rows.filter(r=>r.base.Phone).length} | website: ${rows.filter(r=>r.base.Website).length} | city: ${DOM}, ${DOMC}`);
+
+  // ---------- QC: file likhne se pehle khud check karo ----------
+  const bad = { website:0, mapsUrl:0, phone:0, city:0, junkName:0, streetHasUrl:0 };
+  rows.forEach(r => {
+    const w=r.base.Website, m=r.tail['Google Maps URL'], p=r.base.Phone;
+    if (w && !V.url(w)) bad.website++;
+    if (!/^https:\/\/www\.google\.com\/maps\/place\/\?q=place_id:ChI/.test(m)) bad.mapsUrl++;
+    if (p && !/^\d{3}-\d{3}-\d{2,8}$/.test(p)) bad.phone++;
+    if (!r.base.City) bad.city++;
+    if (/^[0-9][A-Za-z0-9_\-]{18,}$/.test(r.base['Business Name'])) bad.junkName++;
+    if (/https?:\/\//.test(r.base.Street)) bad.streetHasUrl++;
+  });
+  const badTotal = Object.values(bad).reduce((a,b)=>a+b,0);
+  const rejected = Object.entries(QC).filter(([,n])=>n>0);
+  console.log(badTotal===0 ? '🔍 QC pass — koi kharab value nahi mili.'
+                           : '🔍 QC: ' + JSON.stringify(bad));
+  if (rejected.length) console.log('   (validator ne reject kiye: ' + rejected.map(([k,n])=>k+' x'+n).join(', ') + ' — wo khane khali chhode gaye)');
+  if (rows.length < 15) {
+    console.warn(`⚠️ Sirf ${rows.length} leads mile. Agar is search me is se zyada hone chahiye the,`);
+    console.warn(`   to ye link address bar me kholein aur code dobara paste karein:  ${canonical}`);
+  }
+
+  // ---------- 4) xlsx ----------
+  const presentSocials = SOCIAL_DEFS.map(([l])=>l).filter(l => l==='Facebook' || rows.some(x=>x.soc[l]));
+  const baseCols=['Keyword','Business Name','Category','Rating','Reviews','Street','City','State','Zip','Country','Phone','Phone (Original)','Website'];
+  const tailCols=['Plus Code','Hours','Price','Google Maps URL','Full Address'];
+  const headers=[...baseCols,...presentSocials,...tailCols];
+  const urlCols=new Set(['Website','Google Maps URL',...presentSocials]);
+  const aoa=[headers];
+  rows.forEach(l => aoa.push(headers.map(h => baseCols.includes(h)?(l.base[h]??''):(tailCols.includes(h)?(l.tail[h]??''):(l.soc[h]||'')))));
+
+  const fname='maps_leads_'+keyword.replace(/\s+/g,'_').replace(/[^\w\-]/g,'');
+  const colWidths = headers.map(h => h==='Business Name'?30 : h==='Street'?45 : (h==='Website'||h==='Google Maps URL')?38
+                                  : h==='Full Address'?55 : h==='Phone (Original)'?18 : 14);
+  const bytes = makeXlsx(aoa, { urlCols, colWidths });
+  const el = document.createElement('a');
+  el.href = URL.createObjectURL(new Blob([bytes], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
+  el.download = fname + '.xlsx';
+  document.body.appendChild(el); el.click(); el.remove();
+  setTimeout(()=>URL.revokeObjectURL(el.href), 5000);
+  console.log(`🎉 DONE — ${rows.length} leads. Download: ${fname}.xlsx`);
+})();
